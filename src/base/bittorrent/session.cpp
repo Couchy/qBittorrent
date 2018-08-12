@@ -1863,20 +1863,26 @@ TorrentHandle *Session::findTorrent(const InfoHash &hash) const
 
 bool Session::hasActiveTorrents() const
 {
-    foreach (TorrentHandle *const torrent, m_torrents)
-        if (TorrentFilter::ActiveTorrent.match(torrent))
-            return true;
-
-    return false;
+    return std::any_of(m_torrents.begin(), m_torrents.end(), [](TorrentHandle *torrent)
+    {
+        return TorrentFilter::ActiveTorrent.match(torrent);
+    });
 }
 
 bool Session::hasUnfinishedTorrents() const
 {
-    foreach (TorrentHandle *const torrent, m_torrents)
-        if (!torrent->isSeed() && !torrent->isPaused())
-            return true;
+    return std::any_of(m_torrents.begin(), m_torrents.end(), [](const TorrentHandle *torrent)
+    {
+        return (!torrent->isSeed() && !torrent->isPaused());
+    });
+}
 
-    return false;
+bool Session::hasRunningSeed() const
+{
+    return std::any_of(m_torrents.begin(), m_torrents.end(), [](const TorrentHandle *torrent)
+    {
+        return (torrent->isSeed() && !torrent->isPaused());
+    });
 }
 
 void Session::banIP(const QString &ip)
@@ -2122,17 +2128,12 @@ bool Session::addTorrent_impl(CreateTorrentParams params, const MagnetUri &magne
         }
     }
 
+    // If empty then Automatic mode, otherwise Manual mode
+    QString savePath = params.savePath.isEmpty() ? categorySavePath(params.category) : params.savePath;
     libt::add_torrent_params p;
     InfoHash hash;
-    std::vector<boost::uint8_t> filePriorities;
+    const bool fromMagnetUri = magnetUri.isValid();
 
-    QString savePath;
-    if (params.savePath.isEmpty()) // using Automatic mode
-        savePath = categorySavePath(params.category);
-    else  // using Manual mode
-        savePath = params.savePath;
-
-    bool fromMagnetUri = magnetUri.isValid();
     if (fromMagnetUri) {
         hash = magnetUri.hash();
 
@@ -2195,9 +2196,7 @@ bool Session::addTorrent_impl(CreateTorrentParams params, const MagnetUri &magne
         p.flags |= libt::add_torrent_params::flag_use_resume_save_path;
     }
     else {
-        foreach (int prio, params.filePriorities)
-            filePriorities.push_back(prio);
-        p.file_priorities = filePriorities;
+        p.file_priorities = {params.filePriorities.begin(), params.filePriorities.end()};
     }
 
     // We should not add torrent if it already
@@ -2307,7 +2306,7 @@ bool Session::loadMetadata(const MagnetUri &magnetUri)
     p.max_connections = maxConnectionsPerTorrent();
     p.max_uploads = maxUploadsPerTorrent();
 
-    QString savePath = QString("%1/%2").arg(QDir::tempPath(), hash);
+    const QString savePath = Utils::Fs::tempPath() + static_cast<QString>(hash);
     p.save_path = Utils::Fs::toNativePath(savePath).toStdString();
 
     // Forced start
@@ -2357,9 +2356,9 @@ void Session::generateResumeData(bool final)
 {
     foreach (TorrentHandle *const torrent, m_torrents) {
         if (!torrent->isValid()) continue;
-        if (torrent->hasMissingFiles()) continue;
-        if (torrent->isChecking() || torrent->hasError()) continue;
+        if (torrent->isChecking() || torrent->isPaused()) continue;
         if (!final && !torrent->needSaveResumeData()) continue;
+        if (torrent->hasMissingFiles() || torrent->hasError()) continue;
 
         saveTorrentResumeData(torrent, final);
     }
